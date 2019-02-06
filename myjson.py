@@ -1,4 +1,5 @@
 from functools import partial
+from collections import namedtuple
 import sys
 
 class ParseError:
@@ -6,6 +7,8 @@ class ParseError:
         super().__init__(msg)
         self.index = index
 
+Token = namedtuple('Token', ['content', 'index'])
+        
 def scan_space(char, index):
     if char in ' \t\n\r':
         return scan_space
@@ -35,7 +38,7 @@ def scan(src):
 
 if __name__ == '__main__' and '-i' in sys.argv[1:]:
     while True:
-        print('>', end=True)
+        print('>', end=' ')
         src = input()
 
         try:

@@ -1,0 +1,50 @@
+from functools import partial
+from collections import namedtuple
+import sys
+
+class ParseError:
+    def __init__(self, msg, index):
+        super().__init__(msg)
+        self.index = index
+
+Token = namedtuple('Token', ['content', 'index'])
+        
+def scan_space(char, index):
+    if char in ' \t\n\r':
+        return scan_space
+    elif char in '{}[]:,':
+        yield Token(char, index)
+        return scan_space
+    elif char == '"':
+        return partial(scan_string, chars=[])
+    elif char.isdigit():
+        return partial(scan_number, val=int(char))
+    elif char == '-':
+        return scan_minus
+    elif char == 't':
+        return literal_name_scanner('true')
+    elif char == 'f':
+        return literal_name_scanner('false')
+    elif char == 'n':
+        return literal_name_scanner('null')
+    else:
+        raise ParseError('invalid token', index)
+
+def scan(src):
+    proc = scan_space
+    
+    for i, char in enumerate(src):
+        proc = yield from proc(char, i)
+
+if __name__ == '__main__' and '-i' in sys.argv[1:]:
+    while True:
+        print('>', end=True)
+        src = input()
+
+        try:
+            val = scan(src)
+        except ParseError as error:
+            print(f'  {" " * error.index}^')
+            print(f'Error: {error}')
+        else:
+            print(val)
