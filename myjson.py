@@ -2,13 +2,26 @@ from functools import partial
 from collections import namedtuple
 import sys
 
-class ParseError:
+def empty_generator(f):
+    def generator(*args, **kwargs):
+        yield from ()
+        return f(*args, **kwargs)
+
+    return generator
+
+class ParseError(Exception):
     def __init__(self, msg, index):
         super().__init__(msg)
         self.index = index
 
 Token = namedtuple('Token', ['content', 'index'])
-        
+
+def scan(src):
+    proc = scan_space
+    
+    for i, char in enumerate(src):
+        proc = yield from proc(char, i)
+
 def scan_space(char, index):
     if char in ' \t\n\r':
         return scan_space
@@ -17,24 +30,251 @@ def scan_space(char, index):
         return scan_space
     elif char == '"':
         return partial(scan_string, chars=[])
+    elif char == '0':
+        yield Token(0, index)
+        return scan_space
     elif char.isdigit():
-        return partial(scan_number, val=int(char))
+        return partial(scan_number, val=int(char), sign=1)
     elif char == '-':
         return scan_minus
     elif char == 't':
+        return partial(literal_name_scanner('true', True), chars=[])
+    elif char == 'f':
+        return partial(literal_name_scanner('false', False), chars=[])
+    elif char == 'n':
+        return partial(literal_name_scanner('null', None), chars=[])
+    else:
+        raise ParseError('invalid token', index)
+
+def scan_string(char, index, *, chars):
+    if char == '"':
+        yield Token(''.join(chars), index)
+        return scan_space
+    elif char == '\\':
+        return partial(scan_escape_sequence, chars=chars)
+    elif ord(char) < 0x20:
+        raise ParseError(f'invalid character (use \'\\u{ord(char):04x}\')', index)
+    else:
+        chars.append(char)
+        return partial(scan_string, chars=chars)
+
+@empty_generator
+def scan_escape_sequence(char, index, *, chars):
+    if char in '"\\/':
+        chars.append(char)
+        return partial(scan_string, chars=chars)
+    elif char == 'b':
+        chars.append('\b')
+        return partial(scan_string, chars=chars)
+    elif char == 'f':
+        chars.append('\f')
+        return partial(scan_string, chars=chars)
+    elif char == 'n':
+        chars.append('\n')
+        return partial(scan_string, chars=chars)
+    elif char == 'r':
+        chars.append('\r')
+        return partial(scan_string, chars=chars)
+    elif char == 't':
+        chars.append('\t')
+        return partial(scan_string, chars=chars)
+    elif char == 'u':
+        return partial(scan_unicode_escape_sequence, chars=chars, val=0, digitcount=0)
+    else:
+        raise ParseError(f'invalid escape sequence', index)
+
+@empty_generator
+def scan_unicode_escape_sequence(char, index, *, chars, val, digitcount):
+    if char.isdigit():
+        val = val * 16 + int(char)
+
+        if digitcount == 3:
+            chars.append(chr(val))
+            return partial(scan_string, chars=chars)
+        else:
+            return partial(scan_unicode_escape_sequence, chars=chars, val=val, digitcount=digitcount + 1)
+    elif ord('a') < ord(char) < ord('z'):
+        val = val * 16 + 10 + ord(char) - ord('a')
+
+        if digitcount == 3:
+            chars.append(chr(val))
+            return partial(scan_string, chars=chars)
+        else:
+            return partial(scan_unicode_escape_sequence, chars=chars, val=val, digitcount=digitcount + 1)
+    elif ord('A') < ord(char) < ord('Z'):
+        val = val * 16 + 10 + ord(char) - ord('A')
+
+        if digitcount == 3:
+            chars.append(chr(val))
+            return partial(scan_string, chars=chars)
+        else:
+            return partial(scan_unicode_escape_sequence, chars=chars, val=val, digitcount=digitcount + 1)
+    else:
+        raise ParseError('invalid Unicode escape sequence', index)
+
+def scan_number(char, index, *, val, sign):
+    if char.isdigit():
+        return partial(scan_number, val=10 * val + int(char))
+    elif char == '.':
+        return partial(scan_just_after_decimal_point, val=val)
+    elif char in 'eE':
+        return partial(scan_just_after_exponent, val=val)
+    elif char in ' \t\n\r':
+        yield Token(sign * val, index)
+        return scan_space
+    elif char in '{}[]:,':
+        yield Token(sign * val, index)
+        yield Token(char, index)
+        return scan_space
+    elif char == '"':
+        yield Token(sign * val, index)
+        return partial(scan_string, chars=[])
+    elif char == '-':
+        yield Token(sign * val, index)
+        return scan_minus
+    elif char == 't':
+        yield Token(sign * val, index)
         return literal_name_scanner('true')
     elif char == 'f':
+        yield Token(sign * val, index)
         return literal_name_scanner('false')
     elif char == 'n':
+        yield Token(sign * val, index)
         return literal_name_scanner('null')
     else:
         raise ParseError('invalid token', index)
 
-def scan(src):
-    proc = scan_space
+def scan_just_after_decimal_point(char, index, *, val, sign):
+    if char.isdigit():
+        return partial(scan_after_decimal_point, val=val, sign=sign, numer=int(char), denom=10)
+    else:
+        raise ParseError('expected a digit', index)
+
+def scan_after_decimal_point(char, index, *, val, sign, numer, denom):
+    if char.isdigit():
+        return partial(scan_after_decimal_point, val=val, sign=sign, numer=numer * 10 + int(char), denom=10 * denom)
+    elif char in 'eE':
+        return partial(scan_just_after_exponent, val=val + numer / denom, sign=sign)
+    elif char in ' \t\n\r':
+        yield Token(sign * (val + numer / denom), index)
+        return scan_space
+    elif char in '{}[]:,':
+        yield Token(sign * (val + numer / denom), index)
+        yield Token(char, index)
+        return scan_space
+    elif char == '"':
+        yield Token(sign * (val + numer / denom), index)
+        return partial(scan_string, chars=[])
+    elif char == '-':
+        yield Token(sign * (val + numer / denom), index)
+        return scan_minus
+    elif char == 't':
+        yield Token(sign * (val + numer / denom), index)
+        return literal_name_scanner('true')
+    elif char == 'f':
+        yield Token(sign * (val + numer / denom), index)
+        return literal_name_scanner('false')
+    elif char == 'n':
+        yield Token(sign * (val + numer / denom), index)
+        return literal_name_scanner('null')
+    else:
+        raise ParseError('invalid token', index)
+
+def scan_just_after_exponent(char, index, *, val, sign):
+    if char.isdigit():
+        return partial(scan_after_exponent, val=val, sign=sign, exp=int(char), exp_sign=1)
+    elif char == '+':
+        return partial(scan_plus_after_exponent, val=val, sign=sign)
+    elif char == '-':
+        return partial(scan_minus_after_exponent, val=val, sign=sign)
+    else:
+        raise ParseError('expected a digit', index)
+
+def scan_after_exponent(char, index, *, val, sign, exp, exp_sign):
+    if char.isdigit():
+        return partial(scan_after_exponent, val=val, sign=sign, exp=exp * 10 + int(char), exp_sign=exp_sign)
+    elif char in ' \t\n\r':
+        yield Token(sign * val ** (exp_sign * exp), index)
+        return scan_space
+    elif char in '{}[]:,':
+        yield Token(sign * val ** (exp_sign * exp), index)
+        yield Token(char, index)
+        return scan_space
+    elif char == '"':
+        yield Token(sign * val ** (exp_sign * exp), index)
+        return partial(scan_string, chars=[])
+    elif char == '-':
+        yield Token(sign * val ** (exp_sign * exp), index)
+        return scan_minus
+    elif char == 't':
+        yield Token(sign * val ** (exp_sign * exp), index)
+        return literal_name_scanner('true')
+    elif char == 'f':
+        yield Token(sign * val ** (exp_sign * exp), index)
+        return literal_name_scanner('false')
+    elif char == 'n':
+        yield Token(sign * val ** (exp_sign * exp), index)
+        return literal_name_scanner('null')
+    else:
+        raise ParseError('invalid token', index)
+
+def scan_plus_after_exponent(char, index, *, val, sign):
+    if char.isdigit():
+        return partial(scan_after_exponent, val=val, sign=sign, exp=int(char), exp_sign=1)
+    else:
+        raise ParseError('expected a digit', index)
+
+def scan_minus_after_exponent(char, index, *, val, sign):
+    if char.isdigit():
+        return partial(scan_after_exponent, val=val, sign=sign, exp=int(char), exp_sign=-1)
+    else:
+        raise ParseError('expected a digit', index)
+
+def scan_minus(char, index):
+    if char.isdigit():
+        return partial(scan_number, val=int(char), sign=-1)
+    else:
+        raise ParseError('expected a digit', index)
+
+def literal_name_scanner(name, val):
+    def scan_name(char, index, *, chars):
+        if len(chars) == len(name) - 1:
+            yield Token(val, index)
+            return scan_space
+        elif char == name[len(chars)]:
+            chars.append(char)
+            return scan_name(char, index, chars=chars)
+        else:
+            raise ParseError(f'expected \'{name[len(chars)]}\' (to complete the literal name "{name}")')
+
+def parse(tokens):
+    try:
+        first_token = tokens[0]
+    except IndexError:
+        raise ParseError('empty source')
+
+    if first_token == '{':
+        val, index = parse_object(tokens, 1)
+
+        if len(tokens) != index:
+            raise ParseError('trailing data', tokens[index].index)
+
+        return val
+    elif first_token == '[':
+        val, index = parse_array(tokens, 1)
+
+        if len(tokens) != index:
+            raise ParseError('trailing data', tokens[index].index)
+    elif len(tokens) > 1:
+        raise ParseError('trailing data', tokens[1].index)
+    else:
+        return tokens[0].content
+
+def parse_object(tokens, index):
+    if not isinstance(tokens[index].content, str):
+        raise ParseError('invalid name (must be a string)', tokens[0].index)
     
-    for i, char in enumerate(src):
-        proc = yield from proc(char, i)
+    if 
 
 if __name__ == '__main__' and '-i' in sys.argv[1:]:
     while True:
@@ -42,7 +282,7 @@ if __name__ == '__main__' and '-i' in sys.argv[1:]:
         src = input()
 
         try:
-            val = scan(src)
+            val = tuple(scan(src))
         except ParseError as error:
             print(f'  {" " * error.index}^')
             print(f'Error: {error}')
