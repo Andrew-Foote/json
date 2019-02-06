@@ -16,6 +16,14 @@ class ParseError(Exception):
 
 Token = namedtuple('Token', ['content', 'index'])
 
+class ParseDir(Enum):
+    begin_object = '{'
+    end_object = '}'
+    begin_array = '['
+    end_array = ']'
+    pair_separator = ':'
+    list_separator = ','
+
 def scan(src):
     proc = scan_space
     
@@ -26,7 +34,7 @@ def scan_space(char, index):
     if char in ' \t\n\r':
         return scan_space
     elif char in '{}[]:,':
-        yield Token(char, index)
+        yield Token(ParseDir(char), index)
         return scan_space
     elif char == '"':
         return partial(scan_string, chars=[])
@@ -124,7 +132,7 @@ def scan_number(char, index, *, val, sign):
         return scan_space
     elif char in '{}[]:,':
         yield Token(sign * val, index)
-        yield Token(char, index)
+        yield Token(ParseDir(char), index)
         return scan_space
     elif char == '"':
         yield Token(sign * val, index)
@@ -160,7 +168,7 @@ def scan_after_decimal_point(char, index, *, val, sign, numer, denom):
         return scan_space
     elif char in '{}[]:,':
         yield Token(sign * (val + numer / denom), index)
-        yield Token(char, index)
+        yield Token(ParseDir(char), index)
         return scan_space
     elif char == '"':
         yield Token(sign * (val + numer / denom), index)
@@ -198,7 +206,7 @@ def scan_after_exponent(char, index, *, val, sign, exp, exp_sign):
         return scan_space
     elif char in '{}[]:,':
         yield Token(sign * val ** (exp_sign * exp), index)
-        yield Token(char, index)
+        yield Token(ParseDir(char), index)
         return scan_space
     elif char == '"':
         yield Token(sign * val ** (exp_sign * exp), index)
@@ -248,33 +256,64 @@ def literal_name_scanner(name, val):
             raise ParseError(f'expected \'{name[len(chars)]}\' (to complete the literal name "{name}")')
 
 def parse(tokens):
-    try:
-        first_token = tokens[0]
-    except IndexError:
-        raise ParseError('empty source')
-
-    if first_token == '{':
-        val, index = parse_object(tokens, 1)
-
-        if len(tokens) != index:
-            raise ParseError('trailing data', tokens[index].index)
-
-        return val
-    elif first_token == '[':
-        val, index = parse_array(tokens, 1)
-
-        if len(tokens) != index:
-            raise ParseError('trailing data', tokens[index].index)
-    elif len(tokens) > 1:
-        raise ParseError('trailing data', tokens[1].index)
-    else:
-        return tokens[0].content
-
-def parse_object(tokens, index):
-    if not isinstance(tokens[index].content, str):
-        raise ParseError('invalid name (must be a string)', tokens[0].index)
+    val, index = parse_value(tokens, 0)
     
-    if 
+    if index < len(tokens):
+        raise ParseError('trailing data', tokens[index].index)
+
+    return val
+
+def parse_value(tokens, index, char_index):
+    try:
+        token = tokens[index]
+    except IndexError:
+        raise ParseError('expected a value', char_index)
+
+    content = token.content
+    
+    if content == ParseDir.begin_object:
+        return parse_object(tokens, index + 1, token.index)
+    elif content == ParseDir.begin_array:
+        return parse_array(tokens, index + 1, token.index)
+    elif isinstance(content, ParseDir):
+        raise ParseError('expected a value', token.index)
+    else:
+        return content, 1
+
+def parse_object(tokens, index, char_index):
+    if len(tokens) < index + 3:
+        raise ParseError('incomplete object', 
+    
+    obj = {}
+
+    while True:
+        try:
+            token = tokens[index]
+        except IndexError:
+            raise ParseError('incomplete object', char_index)
+            
+        name = token.content
+
+        if name == '}':
+            return obj, index + 1
+
+        if not isinstance(name, str):
+            raise ParseError('invalid name (must be a string)', token.index)
+    
+        index += 1
+
+        try:
+            token = tokens[index]
+        except IndexError:
+            raise ParseError('expected a colon', token.index)
+
+        if token.content != ':':
+            raise ParseError('expected a colon', token.index)
+
+        index += 1
+
+        try:
+            token = tokens[index]
 
 if __name__ == '__main__' and '-i' in sys.argv[1:]:
     while True:
